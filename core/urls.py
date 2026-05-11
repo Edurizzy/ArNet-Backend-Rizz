@@ -37,6 +37,12 @@ urlpatterns = [
         
         # Audit logs
         path('audit/', include('apps.audit.api.urls')),
+        
+        # CRM (Customer Relationship Management)
+        path('crm/', include('apps.crm.api.urls')),
+        
+        # Helpdesk (Support Operations & Communication)
+        path('helpdesk/', include('apps.helpdesk.api.urls')),
     ])),
 ]
 

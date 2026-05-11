@@ -1,33 +1,23 @@
 """
 Local development settings for ArNet project.
-
-This module extends base settings with development-specific configurations.
-Use this for local development environment.
 """
-
 from .base import *
 
-# Development-specific settings
 DEBUG = True
-
-# Additional allowed hosts for local development
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', '*']
 
-# Development database - allow SQLite for quick local setup
 DATABASES['default'].update({
     'OPTIONS': {
-        'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-        'charset': 'utf8mb4',
+        # PostgreSQL specific options (init_command is MySQL-specific)
+        'sslmode': 'prefer',
     },
 })
 
-# Debug toolbar for development
 if DEBUG:
     try:
         import debug_toolbar
         INSTALLED_APPS.append('debug_toolbar')
         MIDDLEWARE.insert(0, 'debug_toolbar.middleware.DebugToolbarMiddleware')
-        
         DEBUG_TOOLBAR_CONFIG = {
             'SHOW_TOOLBAR_CALLBACK': lambda request: DEBUG,
             'SHOW_COLLAPSED': True,
@@ -35,10 +25,8 @@ if DEBUG:
     except ImportError:
         pass
 
-# Console email backend for development
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
-# More permissive CORS for development
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
@@ -47,21 +35,29 @@ CORS_ALLOWED_ORIGINS = [
     'http://127.0.0.1:8080',
 ]
 
-# Development-specific logging
-LOGGING['loggers']['django']['level'] = 'DEBUG'
+# === CORREÇÃO DOS LOGS (Fim do Spam infinito) ===
+LOGGING['loggers']['django']['level'] = 'INFO'
 LOGGING['loggers']['apps']['level'] = 'DEBUG'
 
-# Less strict cache timeout for development
-CACHES['default']['TIMEOUT'] = 60  # 1 minute
+LOGGING['loggers']['django.utils.autoreload'] = {
+    'level': 'INFO',
+    'handlers': ['console'],
+    'propagate': False,
+}
 
-# Celery eager execution in development (optional)
+if 'file' in LOGGING['handlers']:
+    LOGGING['handlers']['file'] = {
+        'class': 'logging.StreamHandler',
+    }
+# ===============================================
+
+CACHES['default']['TIMEOUT'] = 60 
+
 CELERY_TASK_ALWAYS_EAGER = env.bool('CELERY_EAGER', False)
 CELERY_TASK_EAGER_PROPAGATES = True
 
-# Development-specific security settings (relaxed)
 SECURE_SSL_REDIRECT = False
 SESSION_COOKIE_SECURE = False
 CSRF_COOKIE_SECURE = False
 
-# Static files handling in development
 STATICFILES_STORAGE = 'django.contrib.staticfiles.storage.StaticFilesStorage'

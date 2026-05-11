@@ -35,7 +35,7 @@ class AuditLogAdmin(BaseModelAdmin):
         'action_category',
         'outcome',
         'is_sensitive',
-        ('risk_score', admin.RangeFilter),
+        'risk_score',
         'created_at',
         'organization_id'
     ]
