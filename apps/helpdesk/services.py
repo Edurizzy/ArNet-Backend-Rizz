@@ -28,12 +28,15 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 from django.db import transaction
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from .models import Ticket, Message
 from . import selectors
+from .events import build_new_message_event, build_ticket_updated_event
 
 
 # =============================================================================
@@ -66,6 +69,9 @@ def create_ticket(
     title: str,
     channel: str,
     priority: str = Ticket.Priority.MEDIUM,
+    correlation_id: Optional[uuid.UUID] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    source_provider: Optional[str] = None,
     **kwargs
 ) -> Ticket:
     """
@@ -127,6 +133,12 @@ def create_ticket(
     sla_due_at = _calculate_sla_due_date(priority)
     
     # Prepare ticket data
+    ticket_metadata = metadata or kwargs.get('metadata', {}) or {}
+    if correlation_id:
+        ticket_metadata.setdefault('correlation_id', str(correlation_id))
+    if source_provider:
+        ticket_metadata.setdefault('source_provider', source_provider)
+
     ticket_data = {
         'organization_id': organization_id,
         'customer': customer,
@@ -135,7 +147,7 @@ def create_ticket(
         'priority': priority,
         'status': Ticket.Status.OPEN,
         'sla_due_at': sla_due_at,
-        'metadata': kwargs.get('metadata', {}),
+        'metadata': ticket_metadata,
     }
     
     # Handle initial assignment if provided
@@ -151,20 +163,12 @@ def create_ticket(
     # Create the ticket
     ticket = Ticket.objects.create(**ticket_data)
     
-    # Prepare domain event context for future implementation
-    event_context = {
-        'ticket_id': ticket.id,
-        'customer_id': customer.id,
-        'organization_id': organization_id,
-        'channel': channel,
-        'priority': priority,
-        'sla_due_at': sla_due_at,
-        'assigned_to': ticket.assigned_to_id,
-        'created_at': ticket.created_at,
-    }
-    
-    # Future: Emit TicketCreated domain event
-    # domain_events.emit('ticket.created', event_context)
+    event = build_ticket_updated_event(
+        ticket,
+        correlation_id=str(correlation_id) if correlation_id else None,
+        provider=source_provider,
+    )
+    transaction.on_commit(lambda: _broadcast_realtime_event(organization_id, event))
     
     # Log business event for audit and debugging
     print(f"Ticket created: #{str(ticket.id)[:8]} for {customer.name} via {channel}")
@@ -178,7 +182,10 @@ def update_ticket_status(
     organization_id: uuid.UUID,
     new_status: str,
     updated_by: Optional[uuid.UUID] = None,
-    reason: Optional[str] = None
+    reason: Optional[str] = None,
+    correlation_id: Optional[uuid.UUID] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    source_provider: Optional[str] = None,
 ) -> Ticket:
     """
     Update ticket status with business rule validation and audit context.
@@ -248,23 +255,25 @@ def update_ticket_status(
         ticket.metadata = ticket.metadata or {}
         ticket.metadata['reopened_at'] = timezone.now().isoformat()
     
+    if metadata:
+        ticket.metadata = ticket.metadata or {}
+        ticket.metadata.update(metadata)
+    if correlation_id:
+        ticket.metadata = ticket.metadata or {}
+        ticket.metadata['correlation_id'] = str(correlation_id)
+    if source_provider:
+        ticket.metadata = ticket.metadata or {}
+        ticket.metadata['source_provider'] = source_provider
+    
     # Save the ticket
     ticket.save()
     
-    # Prepare domain event context
-    event_context = {
-        'ticket_id': ticket.id,
-        'organization_id': organization_id,
-        'previous_status': previous_status,
-        'new_status': new_status,
-        'updated_by': updated_by,
-        'reason': reason,
-        'updated_at': ticket.updated_at,
-        'sla_due_at': ticket.sla_due_at,
-    }
-    
-    # Future: Emit TicketStatusChanged domain event
-    # domain_events.emit('ticket.status_changed', event_context)
+    event = build_ticket_updated_event(
+        ticket,
+        correlation_id=str(correlation_id) if correlation_id else None,
+        provider=source_provider,
+    )
+    transaction.on_commit(lambda: _broadcast_realtime_event(organization_id, event))
     
     print(f"Ticket status updated: #{str(ticket.id)[:8]} {previous_status} → {new_status}")
     
@@ -308,25 +317,12 @@ def assign_ticket(
             f"Agent {agent_id} does not belong to organization {organization_id}"
         )
     
-    # Store previous assignment for event context
-    previous_agent_id = ticket.assigned_to_id
-    
     # Update assignment
     ticket.assigned_to_id = agent_id
     ticket.save()
     
-    # Prepare domain event context
-    event_context = {
-        'ticket_id': ticket.id,
-        'organization_id': organization_id,
-        'previous_agent_id': previous_agent_id,
-        'new_agent_id': agent_id,
-        'assigned_by': assigned_by,
-        'assigned_at': ticket.updated_at,
-    }
-    
-    # Future: Emit TicketAssigned domain event
-    # domain_events.emit('ticket.assigned', event_context)
+    event = build_ticket_updated_event(ticket)
+    transaction.on_commit(lambda: _broadcast_realtime_event(organization_id, event))
     
     print(f"Ticket assigned: #{str(ticket.id)[:8]} to agent {str(agent_id)[:8]}")
     
@@ -347,6 +343,10 @@ def add_message_to_ticket(
     sender_id: Optional[uuid.UUID] = None,
     is_internal: bool = False,
     external_message_id: Optional[str] = None,
+    correlation_id: Optional[uuid.UUID] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    source_provider: Optional[str] = None,
+    event_timestamp: Optional[str] = None,
     **kwargs
 ) -> Message:
     """
@@ -410,6 +410,14 @@ def add_message_to_ticket(
     ticket = selectors.get_ticket_for_update(ticket_id, organization_id)
     
     # Prepare message data
+    message_metadata = metadata or kwargs.get('metadata', {}) or {}
+    if correlation_id:
+        message_metadata.setdefault('correlation_id', str(correlation_id))
+    if source_provider:
+        message_metadata.setdefault('source_provider', source_provider)
+    if event_timestamp:
+        message_metadata.setdefault('provider_event_timestamp', event_timestamp)
+
     message_data = {
         'organization_id': organization_id,
         'ticket': ticket,
@@ -419,7 +427,7 @@ def add_message_to_ticket(
         'content': content,
         'is_internal': is_internal,
         'external_message_id': external_message_id,
-        'metadata': kwargs.get('metadata', {}),
+        'metadata': message_metadata,
     }
     
     # Create the message
@@ -457,35 +465,22 @@ def add_message_to_ticket(
         
         print(f"Ticket status changed to open by agent response: #{str(ticket.id)[:8]}")
     
-    # Prepare domain event context
-    event_context = {
-        'message_id': message.id,
-        'ticket_id': ticket.id,
-        'organization_id': organization_id,
-        'sender_type': sender_type,
-        'direction': direction,
-        'sender_id': sender_id,
-        'content': content,
-        'is_internal': is_internal,
-        'external_message_id': external_message_id,
-        'created_at': message.created_at,
-        'ticket_state_changed': ticket_state_changed,
-        'new_ticket_status': ticket.status if ticket_state_changed else None,
-    }
-    
-    # Future: Emit MessageCreated domain event
-    # domain_events.emit('message.created', event_context)
-    
-    # If ticket state changed, emit additional event
+    new_message_event = build_new_message_event(
+        message,
+        correlation_id=str(correlation_id) if correlation_id else None,
+        provider=source_provider,
+        event_timestamp=event_timestamp,
+    )
+    transaction.on_commit(lambda: _broadcast_realtime_event(organization_id, new_message_event))
+
     if ticket_state_changed:
-        # Future: Emit TicketStatusChanged domain event
-        # domain_events.emit('ticket.status_changed', {
-        #     'ticket_id': ticket.id,
-        #     'new_status': ticket.status,
-        #     'changed_by_message': message.id,
-        #     ...
-        # })
-        pass
+        ticket_updated_event = build_ticket_updated_event(
+            ticket,
+            correlation_id=str(correlation_id) if correlation_id else None,
+            provider=source_provider,
+            event_timestamp=event_timestamp,
+        )
+        transaction.on_commit(lambda: _broadcast_realtime_event(organization_id, ticket_updated_event))
     
     print(f"Message added: {sender_type} → #{str(ticket.id)[:8]} ({len(content)} chars)")
     
@@ -607,3 +602,25 @@ def _validate_agent_belongs_to_org(agent_id: uuid.UUID, organization_id: uuid.UU
         return True
     except User.DoesNotExist:
         return False
+
+
+def _broadcast_realtime_event(organization_id: uuid.UUID, event: Dict[str, Any]) -> None:
+    """
+    Broadcast an already-built realtime event to the tenant-scoped group.
+
+    This function is intentionally small and side-effect focused. It is called
+    only from transaction.on_commit callbacks, so frontend clients never receive
+    events for writes that were rolled back.
+    """
+    channel_layer = get_channel_layer()
+    if channel_layer is None:
+        return
+
+    async_to_sync(channel_layer.group_send)(
+        _organization_events_group_name(organization_id),
+        event,
+    )
+
+
+def _organization_events_group_name(organization_id: uuid.UUID) -> str:
+    return f"org_{organization_id}_events"

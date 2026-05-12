@@ -19,6 +19,7 @@ django-celery-results==2.5.1
 # ASGI Server & WebSocket Support
 uvicorn[standard]==0.29.0
 gunicorn==21.2.0
+daphne
 channels==4.0.0
 channels-redis==4.2.0
 

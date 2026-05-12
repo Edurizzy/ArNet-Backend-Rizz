@@ -29,6 +29,8 @@ class UserAdmin(TenantSoftDeleteAdmin, BaseUserAdmin):
         'deleted_status',
         'created_at'
     ]
+
+    list_display_links = ['email', 'display_name']
     
     list_filter = [
         'status',

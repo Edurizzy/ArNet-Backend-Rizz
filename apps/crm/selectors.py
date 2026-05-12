@@ -209,6 +209,17 @@ def get_customer_by_document_id(document_id: str, organization_id: uuid.UUID) ->
         return None
 
 
+def get_customer_by_phone(phone: str, organization_id: uuid.UUID) -> Optional[Customer]:
+    """Find a customer by phone number within an organization."""
+    try:
+        return Customer.objects.select_related('organization').get(
+            phone=phone,
+            organization_id=organization_id,
+        )
+    except Customer.DoesNotExist:
+        return None
+
+
 # =============================================================================
 # SUBSCRIPTION SELECTORS
 # =============================================================================

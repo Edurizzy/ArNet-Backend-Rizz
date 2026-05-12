@@ -37,6 +37,7 @@ ALLOWED_HOSTS = env('ALLOWED_HOSTS')
 
 # Application definition
 DJANGO_APPS = [
+    'daphne',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -67,6 +68,7 @@ LOCAL_APPS = [
     'apps.audit',
     'apps.crm',
     'apps.helpdesk',
+    'apps.integrations.meta',
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -292,6 +294,10 @@ X_FRAME_OPTIONS = 'DENY'
 # Email Configuration (will be extended in production)
 EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
 
+# Meta / WhatsApp Cloud API
+META_APP_SECRET = env('META_APP_SECRET', default='')
+META_AUTO_CREATE_CUSTOMERS = env.bool('META_AUTO_CREATE_CUSTOMERS', default=True)
+
 # Health Check
 HEALTH_CHECK = {
     'DISK_USAGE_MAX': 90,  # percent
@@ -303,7 +309,7 @@ CHANNEL_LAYERS = {
     'default': {
         'BACKEND': 'channels_redis.core.RedisChannelLayer',
         'CONFIG': {
-            'hosts': [env('REDIS_URL', default='redis://127.0.0.1:6379/3')],
+            'hosts': [env('REDIS_URL', default='redis://redis:6379/0')],
         },
     },
 }

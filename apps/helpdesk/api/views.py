@@ -168,9 +168,12 @@ class TicketViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         except Exception as e:
-            # Log error in production
+            # Revelando o erro no terminal:
+            import traceback
+            traceback.print_exc()
+            
             return Response(
-                {'error': 'An unexpected error occurred while creating ticket'},
+                {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -500,9 +503,15 @@ class MessageViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         except Exception as e:
-            # Log error in production
+            # Pegando o erro completo e forçando ele a aparecer no Swagger!
+            import traceback
+            error_trace = traceback.format_exc()
+            
             return Response(
-                {'error': 'An unexpected error occurred while creating message'},
+                {
+                    'error': str(e),
+                    'traceback': error_trace  # O erro vai aparecer na sua tela!
+                },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     

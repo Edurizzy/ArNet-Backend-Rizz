@@ -158,7 +158,7 @@ class TicketAdmin(HelpdeskAdminMixin, admin.ModelAdmin):
             'assigned_to',
             'organization'
         ).annotate(
-            message_count=Count('messages'),
+            total_messages=Count('messages'),
             last_message_at=Max('messages__created_at')
         ).prefetch_related('messages')
     
@@ -242,7 +242,7 @@ class TicketAdmin(HelpdeskAdminMixin, admin.ModelAdmin):
     
     def message_count(self, obj: Ticket) -> int:
         """Display message count from annotation."""
-        return getattr(obj, 'message_count', 0)
+        return getattr(obj, 'total_messages', 0)
     message_count.short_description = 'Messages'
     message_count.admin_order_field = 'message_count'
     
@@ -491,7 +491,7 @@ class MessageInline(admin.TabularInline):
         """Optimize inline queryset and limit to recent messages."""
         qs = super().get_queryset(request)
         # Show only recent 10 messages in inline (performance)
-        return qs.order_by('-created_at')[:10]
+        return qs.order_by('-created_at')
 
 
 # Add inline to Ticket admin

@@ -205,7 +205,7 @@ def get_ticket_for_update(ticket_id: uuid.UUID, organization_id: uuid.UUID) -> T
             'customer',
             'assigned_to',
             'organization'
-        ).select_for_update().get(
+        ).select_for_update(of=('self',)).get(
             id=ticket_id,
             organization_id=organization_id
         )
@@ -244,6 +244,24 @@ def get_tickets_by_customer(
         queryset = queryset[:limit]
     
     return queryset
+
+
+def get_open_ticket_for_customer(
+    customer_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    channel: Optional[str] = None,
+) -> Optional[Ticket]:
+    """Return the latest active ticket for a customer, optionally by channel."""
+    queryset = Ticket.objects.filter(
+        customer_id=customer_id,
+        organization_id=organization_id,
+        status__in=[Ticket.Status.OPEN, Ticket.Status.PENDING],
+    ).select_related("customer", "assigned_to")
+
+    if channel:
+        queryset = queryset.filter(channel=channel)
+
+    return queryset.order_by("-updated_at").first()
 
 
 # =============================================================================
