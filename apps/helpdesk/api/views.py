@@ -39,7 +39,7 @@ from .serializers import (
     MessageSerializer, MessageCreateSerializer, MessageListSerializer,
     TicketFilterSerializer, MessageFilterSerializer,
     TicketStatusUpdateSerializer, TicketAssignmentSerializer, BulkTicketAssignmentSerializer,
-    TicketStatisticsSerializer
+    TicketStatisticsSerializer, OutboundWhatsAppMessageCreateSerializer,
 )
 
 
@@ -58,6 +58,7 @@ class TicketViewSet(viewsets.ModelViewSet):
     - PUT/PATCH /tickets/{id}/ - Update ticket properties
     - POST /tickets/{id}/assign/ - Assign to agent
     - POST /tickets/{id}/update-status/ - Change ticket status
+    - POST /tickets/{id}/messages/ - Outbound WhatsApp message (async send)
     - POST /tickets/bulk-assign/ - Bulk assignment operations
     - GET /tickets/statistics/ - Dashboard metrics
     """
@@ -99,7 +100,34 @@ class TicketViewSet(viewsets.ModelViewSet):
             return selectors.get_ticket_detail(ticket_id, organization_id)
         except Ticket.DoesNotExist:
             raise Http404("Ticket not found")
-    
+
+    @action(detail=True, methods=['post'], url_path='messages')
+    def messages(self, request, pk=None):
+        """
+        Create an outbound WhatsApp message for this ticket (async delivery via Celery).
+
+        POST /api/v1/helpdesk/tickets/{id}/messages/
+        """
+        ticket = self.get_object()
+        serializer = OutboundWhatsAppMessageCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        organization_id = request.user.organization_id
+
+        try:
+            message = services.create_outbound_message(
+                ticket_id=ticket.id,
+                organization_id=organization_id,
+                agent_user_id=request.user.id,
+                content=serializer.validated_data['content'],
+                correlation_id=serializer.validated_data.get('correlation_id'),
+            )
+        except services.HelpdeskValidationError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        response_serializer = MessageSerializer(message)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
     def list(self, request):
         """
         List tickets with comprehensive filtering for agent dashboards.

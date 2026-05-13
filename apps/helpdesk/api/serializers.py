@@ -253,6 +253,13 @@ class MessageSerializer(serializers.ModelSerializer):
             'is_internal',
             'external_message_id',
             'metadata',
+            'delivery_status',
+            'provider_message_id',
+            'correlation_id',
+            'queued_at',
+            'sent_at',
+            'delivered_at',
+            'failed_at',
             'is_from_customer',
             'is_ai_generated',
             'needs_response',
@@ -265,6 +272,13 @@ class MessageSerializer(serializers.ModelSerializer):
             'is_from_customer',
             'is_ai_generated', 
             'needs_response',
+            'delivery_status',
+            'provider_message_id',
+            'correlation_id',
+            'queued_at',
+            'sent_at',
+            'delivered_at',
+            'failed_at',
             'created_at',
             'updated_at'
         ]
@@ -371,6 +385,28 @@ class MessageCreateSerializer(serializers.ModelSerializer):
         return content
 
 
+class OutboundWhatsAppMessageCreateSerializer(serializers.Serializer):
+    """POST body for ``/tickets/{id}/messages/`` (WhatsApp outbound)."""
+
+    content = serializers.CharField(
+        required=True,
+        help_text="Message body to send via WhatsApp",
+    )
+    correlation_id = serializers.UUIDField(
+        required=False,
+        allow_null=True,
+        help_text="Optional client trace id; server generates one if omitted",
+    )
+
+    def validate_content(self, value: str) -> str:
+        if not value or not value.strip():
+            raise serializers.ValidationError("Message content cannot be empty")
+        content = value.strip()
+        if len(content) > 10000:
+            raise serializers.ValidationError("Message content too long (max 10,000 characters)")
+        return content
+
+
 class MessageListSerializer(serializers.ModelSerializer):
     """
     Lightweight serializer for message lists and real-time updates.
@@ -390,9 +426,11 @@ class MessageListSerializer(serializers.ModelSerializer):
             'sender_name',
             'content',
             'is_internal',
+            'delivery_status',
+            'provider_message_id',
             'created_at'
         ]
-        read_only_fields = ['id', 'sender_name', 'created_at']
+        read_only_fields = ['id', 'sender_name', 'delivery_status', 'provider_message_id', 'created_at']
     
     def get_sender_name(self, obj: Message) -> str:
         """Get simplified sender name for list display."""

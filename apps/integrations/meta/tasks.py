@@ -60,6 +60,71 @@ def process_meta_webhook_task(self, event_id: str, correlation_id: str) -> int:
         raise self.retry(exc=exc, countdown=countdown)
 
 
+@shared_task(bind=True, max_retries=5)
+def send_outbound_message_task(self, message_id: str, correlation_id: str) -> None:
+    """
+    Send a queued outbound WhatsApp message via Meta Graph API.
+
+    Idempotent: skips if ``provider_message_id`` is already set.
+    """
+    mid = uuid.UUID(message_id)
+    cid = uuid.UUID(correlation_id)
+
+    from apps.helpdesk import services as helpdesk_services
+    from apps.helpdesk.models import Message
+    from apps.integrations.meta import selectors as meta_selectors
+    from apps.integrations.meta.services import MetaGraphAPIError, send_whatsapp_message
+
+    try:
+        org_id = Message.objects.values_list("organization_id", flat=True).get(pk=mid)
+    except Message.DoesNotExist:
+        logger.warning("send_outbound_message_missing_row", extra={"message_id": message_id})
+        return
+
+    with transaction.atomic():
+        msg = helpdesk_services.start_outbound_message_send(mid, org_id)
+
+    if msg.provider_message_id:
+        return
+    if msg.delivery_status != Message.DeliveryStatus.SENDING:
+        return
+
+    try:
+        conn = meta_selectors.get_active_whatsapp_connection_for_org(org_id)
+    except meta_selectors.MetaWhatsAppConnectionError as exc:
+        with transaction.atomic():
+            helpdesk_services.finalize_outbound_message_failed(mid, org_id, str(exc))
+        finalized = Message.objects.get(pk=mid)
+        helpdesk_services.broadcast_helpdesk_message_event(
+            org_id, finalized, correlation_id=cid, provider="meta"
+        )
+        return
+
+    row = Message.objects.select_related("ticket", "ticket__customer").get(pk=mid)
+    to_number = helpdesk_services.normalize_whatsapp_to_number(row.ticket.customer.phone or "")
+
+    try:
+        wamid = send_whatsapp_message(conn.phone_number_id, to_number, row.content)
+    except MetaGraphAPIError as exc:
+        if self.request.retries >= self.max_retries:
+            with transaction.atomic():
+                helpdesk_services.finalize_outbound_message_failed(mid, org_id, str(exc))
+            finalized = Message.objects.get(pk=mid)
+            helpdesk_services.broadcast_helpdesk_message_event(
+                org_id, finalized, correlation_id=cid, provider="meta"
+            )
+            return
+        countdown = min(60 * (2 ** self.request.retries), 900)
+        raise self.retry(exc=exc, countdown=countdown) from exc
+
+    with transaction.atomic():
+        finalized = helpdesk_services.finalize_outbound_message_sent(mid, org_id, wamid)
+
+    helpdesk_services.broadcast_helpdesk_message_event(
+        org_id, finalized, correlation_id=cid, provider="meta"
+    )
+
+
 @transaction.atomic
 def _mark_event_processing(event_id: uuid.UUID, correlation_id: uuid.UUID) -> None:
     event = get_raw_event(event_id, correlation_id)

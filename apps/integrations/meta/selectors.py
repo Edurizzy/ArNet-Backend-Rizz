@@ -12,6 +12,36 @@ from .models import (
 )
 
 
+class MetaWhatsAppConnectionError(Exception):
+    """Raised when WhatsApp connection cannot be resolved for an organization."""
+
+
+def get_active_whatsapp_connection_for_org(
+    organization_id: uuid.UUID,
+) -> WhatsAppBusinessAccountConnection:
+    """
+    Return the single active WhatsApp Business connection for outbound sends.
+
+    Raises:
+        MetaWhatsAppConnectionError: If zero or multiple active connections exist.
+    """
+    qs = WhatsAppBusinessAccountConnection.objects.filter(
+        organization_id=organization_id,
+        is_active=True,
+    ).select_related("organization")
+    count = qs.count()
+    if count == 0:
+        raise MetaWhatsAppConnectionError(
+            f"No active WhatsApp connection for organization {organization_id}"
+        )
+    if count > 1:
+        raise MetaWhatsAppConnectionError(
+            f"Multiple active WhatsApp connections for organization {organization_id}; "
+            "disambiguation by ticket is not implemented"
+        )
+    return qs.get()
+
+
 def get_connection_by_phone_number_id(phone_number_id: str) -> WhatsAppBusinessAccountConnection:
     """Return the active tenant connection for a Meta phone number ID."""
     return WhatsAppBusinessAccountConnection.objects.select_related("organization").get(

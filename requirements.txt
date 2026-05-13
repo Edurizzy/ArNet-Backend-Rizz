@@ -92,4 +92,4 @@ pytz==2024.1
 pyjwt==2.8.0
 
 # Environment Configuration
-django-configurations==2.5.1
+django-configurations==2.5.1httpx==0.27.0

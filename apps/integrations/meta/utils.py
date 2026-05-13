@@ -20,6 +20,14 @@ class MetaMessageData:
     metadata: Dict[str, Any]
 
 
+@dataclass(frozen=True)
+class MetaStatusUpdateData:
+    provider_message_id: str
+    phone_number_id: str
+    status: str
+    timestamp: Optional[str]
+
+
 def generate_correlation_id() -> uuid.UUID:
     """Generate a trace ID that follows the webhook through the pipeline."""
     return uuid.uuid4()
@@ -96,6 +104,46 @@ def extract_meta_message_data(payload: Dict[str, Any]) -> List[MetaMessageData]:
                 )
 
     return messages
+
+
+def extract_meta_status_data(payload: Dict[str, Any]) -> List[MetaStatusUpdateData]:
+    """Extract WhatsApp message status updates (sent, delivered, read, failed)."""
+    updates: List[MetaStatusUpdateData] = []
+
+    for entry in _as_list(payload.get("entry")):
+        for change in _as_list(entry.get("changes")):
+            value = change.get("value") if isinstance(change, dict) else {}
+            if not isinstance(value, dict):
+                continue
+
+            metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+            phone_number_id = metadata.get("phone_number_id")
+            if not phone_number_id:
+                continue
+
+            for status in _as_list(value.get("statuses")):
+                if not isinstance(status, dict):
+                    continue
+
+                sid = status.get("id")
+                st = status.get("status")
+                if sid is None or st is None:
+                    continue
+                sid_str = str(sid).strip()
+                st_str = str(st).strip().lower()
+                if not sid_str or not st_str:
+                    continue
+
+                updates.append(
+                    MetaStatusUpdateData(
+                        provider_message_id=sid_str,
+                        phone_number_id=str(phone_number_id),
+                        status=st_str,
+                        timestamp=status.get("timestamp") if isinstance(status.get("timestamp"), str) else None,
+                    )
+                )
+
+    return updates
 
 
 def _extract_text_body(message: Dict[str, Any]) -> Optional[str]:

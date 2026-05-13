@@ -397,6 +397,40 @@ def get_message_by_external_id(
         return None
 
 
+def get_message_by_provider_message_id(
+    provider_message_id: str,
+    organization_id: uuid.UUID,
+) -> Optional[Message]:
+    """Lookup message by WhatsApp wamid (outbound) within a tenant."""
+    if not provider_message_id:
+        return None
+    try:
+        return Message.objects.select_related("ticket", "ticket__customer").get(
+            provider_message_id=provider_message_id,
+            organization_id=organization_id,
+        )
+    except Message.DoesNotExist:
+        return None
+
+
+def get_message_for_outbound_send(
+    message_id: uuid.UUID,
+    organization_id: uuid.UUID,
+) -> Message:
+    """Lock message row for outbound send pipeline (Celery)."""
+    try:
+        return Message.objects.select_related("ticket", "ticket__customer").select_for_update(
+            of=("self",),
+        ).get(
+            id=message_id,
+            organization_id=organization_id,
+        )
+    except Message.DoesNotExist:
+        raise Message.DoesNotExist(
+            f"Message {message_id} not found for organization {organization_id}"
+        )
+
+
 def get_unread_messages_count(
     ticket_id: uuid.UUID,
     organization_id: uuid.UUID,

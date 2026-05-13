@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Optional
+from typing import Any, Dict, Optional
 
+import httpx
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -19,9 +20,69 @@ from apps.helpdesk.models import Message, Ticket
 from .events import build_meta_ingestion_context
 from .models import ProcessedProviderMessage, RawWebhookEvent
 from .selectors import get_connection_by_phone_number_id, get_raw_event
-from .utils import MetaMessageData, extract_meta_message_data
+from .utils import MetaMessageData, MetaStatusUpdateData, extract_meta_message_data, extract_meta_status_data
 
 logger = logging.getLogger(__name__)
+
+
+class MetaGraphAPIError(Exception):
+    """Raised when the WhatsApp Cloud API returns an error or an unexpected body."""
+
+
+def send_whatsapp_message(phone_number_id: str, to: str, body: str) -> str:
+    """
+    Send a text message via Meta Graph API (WhatsApp Cloud API).
+
+    Returns the provider message id (wamid) from the response.
+    """
+    token = (getattr(settings, "META_WHATSAPP_ACCESS_TOKEN", None) or "").strip()
+    if not token:
+        raise MetaGraphAPIError("META_WHATSAPP_ACCESS_TOKEN is not configured")
+
+    version = (getattr(settings, "META_GRAPH_API_VERSION", None) or "v19.0").strip().strip("/")
+    url = f"https://graph.facebook.com/{version}/{phone_number_id}/messages"
+
+    payload: Dict[str, Any] = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "text",
+        "text": {"preview_url": False, "body": body},
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(url, json=payload, headers=headers)
+    except httpx.RequestError as exc:
+        raise MetaGraphAPIError(f"Graph API request failed: {exc}") from exc
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise MetaGraphAPIError(
+            f"Graph API returned non-JSON (status {response.status_code})"
+        ) from exc
+
+    if response.status_code >= 400:
+        err = data.get("error", {})
+        msg = err.get("message", response.text)
+        raise MetaGraphAPIError(f"Graph API HTTP {response.status_code}: {msg}")
+
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise MetaGraphAPIError("Graph API response missing messages[0]")
+    first = messages[0]
+    if not isinstance(first, dict):
+        raise MetaGraphAPIError("Graph API messages[0] is not an object")
+    wamid = first.get("id")
+    if not wamid or not isinstance(wamid, str):
+        raise MetaGraphAPIError("Graph API response missing messages[0].id")
+    return wamid
 
 
 class MetaWebhookProcessingError(Exception):
@@ -58,6 +119,7 @@ def process_meta_webhook(event_id: uuid.UUID, correlation_id: uuid.UUID) -> int:
     """
     raw_event = get_raw_event(event_id, correlation_id)
     extracted_messages = extract_meta_message_data(raw_event.payload)
+    extracted_statuses = extract_meta_status_data(raw_event.payload)
 
     logger.info(
         "meta_webhook_normalized",
@@ -65,7 +127,7 @@ def process_meta_webhook(event_id: uuid.UUID, correlation_id: uuid.UUID) -> int:
             correlation_id=str(correlation_id),
             event_id=str(event_id),
         )
-        | {"message_count": len(extracted_messages)},
+        | {"message_count": len(extracted_messages), "status_count": len(extracted_statuses)},
     )
 
     processed_count = 0
@@ -73,7 +135,49 @@ def process_meta_webhook(event_id: uuid.UUID, correlation_id: uuid.UUID) -> int:
         if _process_message(raw_event, message_data, correlation_id):
             processed_count += 1
 
+    for status_data in extracted_statuses:
+        if _process_status_update(status_data, correlation_id):
+            processed_count += 1
+
     return processed_count
+
+
+def _process_status_update(
+    status_data: MetaStatusUpdateData,
+    correlation_id: uuid.UUID,
+) -> bool:
+    """Apply Meta delivery status to helpdesk message if present."""
+    from .models import WhatsAppBusinessAccountConnection
+
+    try:
+        connection = get_connection_by_phone_number_id(status_data.phone_number_id)
+    except WhatsAppBusinessAccountConnection.DoesNotExist:
+        logger.warning(
+            "meta_status_unknown_phone_number_id",
+            extra={
+                "phone_number_id": status_data.phone_number_id,
+                "correlation_id": str(correlation_id),
+            },
+        )
+        return False
+    organization_id = connection.organization_id
+    updated = helpdesk_services.update_message_delivery_from_meta_status(
+        organization_id=organization_id,
+        provider_message_id=status_data.provider_message_id,
+        meta_status=status_data.status,
+        status_timestamp=status_data.timestamp,
+    )
+    if updated:
+        logger.info(
+            "meta_webhook_status_applied",
+            extra=build_meta_ingestion_context(
+                correlation_id=str(correlation_id),
+                organization_id=str(organization_id),
+                provider_message_id=status_data.provider_message_id,
+            )
+            | {"meta_status": status_data.status},
+        )
+    return updated
 
 
 @transaction.atomic

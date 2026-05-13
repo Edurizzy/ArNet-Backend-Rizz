@@ -24,6 +24,7 @@ Each service function is structured to easily emit domain events
 when the event-driven infrastructure is implemented.
 """
 
+import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
@@ -36,7 +37,13 @@ from django.utils import timezone
 
 from .models import Ticket, Message
 from . import selectors
-from .events import build_new_message_event, build_ticket_updated_event
+from .events import (
+    build_message_delivery_updated_event,
+    build_new_message_event,
+    build_ticket_updated_event,
+)
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -485,6 +492,358 @@ def add_message_to_ticket(
     print(f"Message added: {sender_type} → #{str(ticket.id)[:8]} ({len(content)} chars)")
     
     return message
+
+
+# =============================================================================
+# OUTBOUND WHATSAPP (META) PIPELINE
+# =============================================================================
+
+
+def _outbound_success_rank(status: Optional[str]) -> int:
+    if not status:
+        return 0
+    order: Dict[str, int] = {
+        Message.DeliveryStatus.PENDING: 10,
+        Message.DeliveryStatus.QUEUED: 20,
+        Message.DeliveryStatus.SENDING: 30,
+        Message.DeliveryStatus.SENT: 40,
+        Message.DeliveryStatus.DELIVERED: 50,
+    }
+    return order.get(status, 0)
+
+
+def broadcast_helpdesk_message_event(
+    organization_id: uuid.UUID,
+    message: Message,
+    *,
+    correlation_id: Optional[uuid.UUID] = None,
+    provider: Optional[str] = "meta",
+    event_timestamp: Optional[str] = None,
+) -> None:
+    """Emit new_message-shaped WebSocket event (post-commit or from Celery)."""
+    event = build_message_delivery_updated_event(
+        message,
+        correlation_id=str(correlation_id) if correlation_id else None,
+        provider=provider,
+        event_timestamp=event_timestamp,
+    )
+    _broadcast_realtime_event(organization_id, event)
+
+
+def normalize_whatsapp_to_number(phone: str) -> str:
+    cleaned = (phone or "").strip()
+    if not cleaned:
+        raise HelpdeskValidationError("Customer phone is required for WhatsApp outbound")
+    if cleaned.startswith("+"):
+        return "".join(character for character in cleaned if character not in " \t")
+    digits = "".join(character for character in cleaned if character.isdigit())
+    if not digits:
+        raise HelpdeskValidationError("Customer phone is invalid for WhatsApp outbound")
+    return f"+{digits}"
+
+
+@transaction.atomic
+def create_outbound_message(
+    ticket_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    agent_user_id: uuid.UUID,
+    content: str,
+    correlation_id: Optional[uuid.UUID] = None,
+) -> Message:
+    """
+    Create an outbound WhatsApp message: persist as queued, enqueue Celery after commit.
+
+    Meta API is never called inside this transaction.
+    """
+    if not content or not content.strip():
+        raise HelpdeskValidationError("Message content is required")
+
+    content = content.strip()
+    correlation = correlation_id or uuid.uuid4()
+
+    ticket = selectors.get_ticket_for_update(ticket_id, organization_id)
+    if ticket.channel != Ticket.Channel.WHATSAPP:
+        raise HelpdeskValidationError("Outbound messaging is only available for WhatsApp tickets")
+
+    normalize_whatsapp_to_number(ticket.customer.phone or "")
+
+    if not _validate_agent_belongs_to_org(agent_user_id, organization_id):
+        raise HelpdeskValidationError(
+            f"Agent {agent_user_id} does not belong to organization {organization_id}"
+        )
+
+    now = timezone.now()
+    message = Message.objects.create(
+        organization_id=organization_id,
+        ticket=ticket,
+        sender_type=Message.SenderType.AGENT,
+        direction=Message.Direction.OUTBOUND,
+        sender_id=agent_user_id,
+        content=content,
+        is_internal=False,
+        delivery_status=Message.DeliveryStatus.QUEUED,
+        queued_at=now,
+        correlation_id=correlation,
+        metadata={"correlation_id": str(correlation)},
+    )
+
+    ticket.save()
+
+    ticket_state_changed = False
+    if (
+        ticket.status == Ticket.Status.PENDING
+    ):
+        ticket.status = Ticket.Status.OPEN
+        ticket.save()
+        ticket_state_changed = True
+
+    new_message_event = build_new_message_event(
+        message,
+        correlation_id=str(correlation),
+        provider="meta",
+    )
+    transaction.on_commit(
+        lambda: _broadcast_realtime_event(organization_id, new_message_event)
+    )
+
+    if ticket_state_changed:
+        ticket_updated_event = build_ticket_updated_event(
+            ticket,
+            correlation_id=str(correlation),
+            provider="meta",
+        )
+        transaction.on_commit(
+            lambda: _broadcast_realtime_event(organization_id, ticket_updated_event)
+        )
+
+    def _enqueue_outbound() -> None:
+        from apps.integrations.meta.tasks import send_outbound_message_task
+
+        send_outbound_message_task.delay(str(message.id), str(correlation))
+
+    transaction.on_commit(_enqueue_outbound)
+
+    return message
+
+
+@transaction.atomic
+def start_outbound_message_send(message_id: uuid.UUID, organization_id: uuid.UUID) -> Message:
+    """
+    Transition queued -> sending under row lock.
+
+    If the row is already ``sending`` without a provider id (worker died mid-flight),
+    the same state is returned so a retry can still invoke the Graph API once.
+    """
+    message = selectors.get_message_for_outbound_send(message_id, organization_id)
+    if message.provider_message_id:
+        return message
+    if message.delivery_status in (
+        Message.DeliveryStatus.FAILED,
+        Message.DeliveryStatus.SENT,
+        Message.DeliveryStatus.DELIVERED,
+    ):
+        return message
+    if message.delivery_status == Message.DeliveryStatus.QUEUED:
+        message.delivery_status = Message.DeliveryStatus.SENDING
+        message.save(update_fields=["delivery_status", "updated_at"])
+    elif message.delivery_status != Message.DeliveryStatus.SENDING:
+        return message
+    return message
+
+
+@transaction.atomic
+def finalize_outbound_message_sent(
+    message_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    provider_message_id: str,
+) -> Message:
+    """Persist wamid and sent (or noop if webhook advanced state first)."""
+    message = selectors.get_message_for_outbound_send(message_id, organization_id)
+    if message.provider_message_id:
+        return message
+    if message.delivery_status == Message.DeliveryStatus.FAILED:
+        return message
+
+    current_rank = _outbound_success_rank(message.delivery_status)
+    delivered_rank = _outbound_success_rank(Message.DeliveryStatus.DELIVERED)
+
+    if current_rank >= delivered_rank:
+        message.provider_message_id = provider_message_id
+        message.save(update_fields=["provider_message_id", "updated_at"])
+        return message
+
+    now = timezone.now()
+    message.provider_message_id = provider_message_id
+    message.delivery_status = Message.DeliveryStatus.SENT
+    message.sent_at = now
+    message.save(
+        update_fields=[
+            "provider_message_id",
+            "delivery_status",
+            "sent_at",
+            "updated_at",
+        ]
+    )
+    return message
+
+
+@transaction.atomic
+def finalize_outbound_message_failed(
+    message_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    error_message: str,
+) -> Message:
+    """Mark message failed unless already delivered or already sent with wamid."""
+    message = selectors.get_message_for_outbound_send(message_id, organization_id)
+    if message.provider_message_id:
+        return message
+    if _outbound_success_rank(message.delivery_status) >= _outbound_success_rank(
+        Message.DeliveryStatus.DELIVERED
+    ):
+        return message
+
+    meta = dict(message.metadata or {})
+    meta["outbound_last_error"] = error_message[:2000]
+    message.metadata = meta
+    message.delivery_status = Message.DeliveryStatus.FAILED
+    message.failed_at = timezone.now()
+    message.save(
+        update_fields=["metadata", "delivery_status", "failed_at", "updated_at"]
+    )
+    return message
+
+
+@transaction.atomic
+def update_message_delivery_from_meta_status(
+    organization_id: uuid.UUID,
+    provider_message_id: str,
+    meta_status: str,
+    *,
+    status_timestamp: Optional[str] = None,
+) -> bool:
+    """
+    Apply Meta message status webhook (sent / delivered / failed / read).
+
+    Returns True if a message row was updated or metadata was touched.
+    """
+    if not provider_message_id:
+        return False
+
+    key = (meta_status or "").lower()
+    if key == "read":
+        message = selectors.get_message_by_provider_message_id(
+            provider_message_id, organization_id
+        )
+        if not message:
+            return False
+        locked = Message.objects.select_for_update(of=("self",)).get(pk=message.pk)
+        meta = dict(locked.metadata or {})
+        meta["meta_read_receipt_at"] = status_timestamp
+        locked.metadata = meta
+        locked.save(update_fields=["metadata", "updated_at"])
+        cid = locked.correlation_id
+        oid = organization_id
+        mid = locked.id
+
+        def _broadcast_read() -> None:
+            refreshed = Message.objects.get(pk=mid)
+            broadcast_helpdesk_message_event(
+                oid,
+                refreshed,
+                correlation_id=cid,
+                provider="meta",
+                event_timestamp=status_timestamp,
+            )
+
+        transaction.on_commit(_broadcast_read)
+        return True
+
+    target_map = {
+        "sent": Message.DeliveryStatus.SENT,
+        "delivered": Message.DeliveryStatus.DELIVERED,
+        "failed": Message.DeliveryStatus.FAILED,
+    }
+    if key not in target_map:
+        return False
+    target = target_map[key]
+
+    try:
+        message = Message.objects.select_for_update(of=("self",)).select_related(
+            "ticket"
+        ).get(
+            provider_message_id=provider_message_id,
+            organization_id=organization_id,
+        )
+    except Message.DoesNotExist:
+        logger.info(
+            "meta_status_no_message_yet",
+            extra={
+                "provider_message_id": provider_message_id,
+                "organization_id": str(organization_id),
+                "meta_status": key,
+            },
+        )
+        return False
+
+    if key == "failed":
+        if _outbound_success_rank(message.delivery_status) >= _outbound_success_rank(
+            Message.DeliveryStatus.DELIVERED
+        ):
+            return False
+        meta = dict(message.metadata or {})
+        meta["meta_failed_at"] = status_timestamp
+        message.metadata = meta
+        message.delivery_status = Message.DeliveryStatus.FAILED
+        message.failed_at = timezone.now()
+        message.save(
+            update_fields=["metadata", "delivery_status", "failed_at", "updated_at"]
+        )
+        oid = organization_id
+        mid = message.id
+        cid = message.correlation_id
+
+        def _broadcast_failed() -> None:
+            refreshed = Message.objects.get(pk=mid)
+            broadcast_helpdesk_message_event(
+                oid,
+                refreshed,
+                correlation_id=cid,
+                provider="meta",
+                event_timestamp=status_timestamp,
+            )
+
+        transaction.on_commit(_broadcast_failed)
+        return True
+
+    if _outbound_success_rank(message.delivery_status) >= _outbound_success_rank(target):
+        return False
+
+    now = timezone.now()
+    message.delivery_status = target
+    if target == Message.DeliveryStatus.SENT:
+        message.sent_at = message.sent_at or now
+    if target == Message.DeliveryStatus.DELIVERED:
+        message.delivered_at = now
+        message.sent_at = message.sent_at or now
+    message.save(
+        update_fields=["delivery_status", "sent_at", "delivered_at", "updated_at"]
+    )
+    oid = organization_id
+    mid = message.id
+    cid = message.correlation_id
+
+    def _broadcast_delivery() -> None:
+        refreshed = Message.objects.get(pk=mid)
+        broadcast_helpdesk_message_event(
+            oid,
+            refreshed,
+            correlation_id=cid,
+            provider="meta",
+            event_timestamp=status_timestamp,
+        )
+
+    transaction.on_commit(_broadcast_delivery)
+    return True
 
 
 # =============================================================================

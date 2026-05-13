@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from django.core.validators import MinLengthValidator
 from django.db import models
+from django.db.models import Q
 
 from apps.common.models import TenantAwareModel
 
@@ -236,7 +237,16 @@ class Message(TenantAwareModel):
     class Direction(models.TextChoices):
         INBOUND = 'inbound', 'Inbound'         # Message coming into the platform
         OUTBOUND = 'outbound', 'Outbound'      # Message going out from the platform
-    
+
+    class DeliveryStatus(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        QUEUED = 'queued', 'Queued'
+        SENDING = 'sending', 'Sending'
+        SENT = 'sent', 'Sent'
+        DELIVERED = 'delivered', 'Delivered'
+        READ = 'read', 'Read'
+        FAILED = 'failed', 'Failed'
+
     # Core Relationship
     ticket = models.ForeignKey(
         Ticket,
@@ -291,10 +301,43 @@ class Message(TenantAwareModel):
         blank=True,
         help_text="AI context, automation data, attachments, rich content, etc."
     )
+
+    delivery_status = models.CharField(
+        max_length=20,
+        choices=DeliveryStatus.choices,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Outbound delivery lifecycle; null for inbound-only messages",
+    )
+    provider_message_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="WhatsApp Cloud API message id (wamid) after send",
+    )
+    correlation_id = models.UUIDField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Trace id for outbound pipeline and webhooks",
+    )
+    queued_at = models.DateTimeField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    failed_at = models.DateTimeField(null=True, blank=True)
     
     class Meta:
         verbose_name = "Message"
         verbose_name_plural = "Messages"
+        constraints = [
+            models.UniqueConstraint(
+                fields=['organization', 'provider_message_id'],
+                condition=Q(provider_message_id__isnull=False),
+                name='helpdesk_msg_org_provider_msg_unique',
+            ),
+        ]
         
         # High-performance indexes for operational queries
         indexes = [
@@ -312,6 +355,12 @@ class Message(TenantAwareModel):
             
             # Customer communication history
             models.Index(fields=['organization', 'sender_id', 'created_at'], name='helpdesk_msg_sender_created'),
+
+            models.Index(
+                fields=['organization', 'provider_message_id'],
+                name='helpdesk_msg_org_provider_id',
+            ),
+            models.Index(fields=['organization', 'delivery_status'], name='helpdesk_msg_org_delivery'),
         ]
         
         # Ensure message ordering is consistent
