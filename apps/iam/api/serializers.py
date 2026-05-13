@@ -141,6 +141,8 @@ class UserSerializer(serializers.ModelSerializer):
     """
     
     full_name = serializers.SerializerMethodField()
+    name = serializers.SerializerMethodField()
+    organization_id = serializers.SerializerMethodField()
     organization_name = serializers.SerializerMethodField()
     role = serializers.SerializerMethodField()
     can_login = serializers.SerializerMethodField()
@@ -153,6 +155,7 @@ class UserSerializer(serializers.ModelSerializer):
             'first_name',
             'last_name',
             'display_name',
+            'name',
             'full_name',
             'phone',
             'avatar',
@@ -163,6 +166,7 @@ class UserSerializer(serializers.ModelSerializer):
             'email_verified',
             'two_factor_enabled',
             'organization_name',
+            'organization_id',
             'role',
             'can_login',
             'last_login',
@@ -180,6 +184,14 @@ class UserSerializer(serializers.ModelSerializer):
     def get_full_name(self, obj):
         """Get user's full name."""
         return obj.get_full_name()
+
+    def get_name(self, obj):
+        """Get stable display name for frontend identity."""
+        return obj.get_display_name()
+
+    def get_organization_id(self, obj):
+        """Expose tenant ID required by realtime and REST isolation."""
+        return str(obj.organization_id) if obj.organization_id else None
     
     def get_organization_name(self, obj):
         """Get organization name."""

@@ -11,6 +11,7 @@ urlpatterns = [
     # Authentication endpoints
     path('login/', views.CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh_contract'),
     path('logout/', views.logout, name='logout'),
     
     # User registration and management

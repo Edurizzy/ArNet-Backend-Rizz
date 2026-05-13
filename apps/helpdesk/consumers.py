@@ -22,46 +22,22 @@ class HelpdeskConsumer(AsyncWebsocketConsumer):
     async def connect(self) -> None:
         self.joined_groups: Set[str] = set()
 
-        # ====================================================
-        # HACK TEMPORÁRIO PARA TESTE SEM LOGIN NO FRONTEND
-        # ====================================================
-        # user = self.scope.get("user")
-        # if not user or not user.is_authenticated:
-        #     await self.close(code=4401)
-        #     return
-        # 
-        # organization_id = getattr(user, "organization_id", None)
-        # if not organization_id:
-        #     await self.close(code=4403)
-        #     return
-        # self.organization_id = str(organization_id)
+        user = self.scope.get("user")
+        if not user or not user.is_authenticated:
+            await self.close(code=4401)
+            return
 
-        # Forçando o ID da sua Organização para o teste!
-        self.organization_id = "684e9201-e7f6-4ea7-9c2f-83d7c26b1593"
-        # ====================================================
+        organization_id = getattr(user, "organization_id", None)
+        if not organization_id:
+            await self.close(code=4403)
+            return
+
+        self.organization_id = str(organization_id)
 
         self.organization_group_name = self._organization_group_name(self.organization_id)
 
         await self._join_group(self.organization_group_name)
         await self.accept()
-    # async def connect(self) -> None:
-    #     self.joined_groups: Set[str] = set()
-
-    #     user = self.scope.get("user")
-    #     if not user or not user.is_authenticated:
-    #         await self.close(code=4401)
-    #         return
-
-    #     organization_id = getattr(user, "organization_id", None)
-    #     if not organization_id:
-    #         await self.close(code=4403)
-    #         return
-
-    #     self.organization_id = str(organization_id)
-    #     self.organization_group_name = self._organization_group_name(self.organization_id)
-
-    #     await self._join_group(self.organization_group_name)
-    #     await self.accept()
 
     async def disconnect(self, close_code: int) -> None:
         for group_name in list(getattr(self, "joined_groups", set())):
