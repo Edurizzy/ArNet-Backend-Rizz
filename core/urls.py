@@ -44,6 +44,9 @@ urlpatterns = [
         # Helpdesk (Support Operations & Communication)
         path('helpdesk/', include('apps.helpdesk.api.urls')),
 
+        # Integration channels (per-organization providers)
+        path('integrations/', include('apps.integrations.api.urls')),
+
         # Webhooks
         path('webhooks/meta/', include('apps.integrations.meta.api.urls')),
     ])),

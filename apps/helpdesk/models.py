@@ -186,7 +186,7 @@ class Ticket(TenantAwareModel):
         return timezone.now() > self.sla_due_at
     
     @property
-    def message_count(self) -> int:
+    def get_message_count(self):
         """
         Get count of messages in this ticket.
         

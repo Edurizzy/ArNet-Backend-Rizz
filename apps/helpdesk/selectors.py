@@ -281,56 +281,26 @@ def list_messages_for_ticket(
     - Infinite scroll pagination
     - WebSocket updates
     - Large conversation performance
-    
-    Args:
-        ticket_id: UUID of the ticket
-        organization_id: UUID of the organization (tenant isolation)
-        pagination: Optional pagination parameters:
-            - limit: Number of messages to return
-            - offset: Number of messages to skip
-            - before_id: Get messages before this message ID (for scrolling up)
-            - after_id: Get messages after this message ID (for real-time updates)
-            
-    Returns:
-        QuerySet of Message instances optimized for conversation display
-        
-    Example usage:
-        # Load latest 50 messages for conversation view
-        messages = list_messages_for_ticket(ticket_id, org_id, {
-            'limit': 50
-        })
-        
-        # Get new messages after last seen (for real-time updates)
-        new_messages = list_messages_for_ticket(ticket_id, org_id, {
-            'after_id': last_message_id
-        })
     """
-    # Base query with tenant isolation AND ticket scope
+    # 1. Base query com isolamento de tenant e ORDENAÇÃO APLICADA PRIMEIRO
     queryset = Message.objects.filter(
         ticket_id=ticket_id,
         organization_id=organization_id
-    )
+    ).order_by('created_at')
     
-    # Apply pagination filters if provided
     if pagination:
-        # Limit number of messages (for initial load and infinite scroll)
-        if 'limit' in pagination and pagination['limit']:
-            queryset = queryset[:pagination['limit']]
+        # 2. Aplica filtros cronológicos (before_id, after_id) ANTES do slice
+        if pagination.get('before_id'):
+            try:
+                before_message = Message.objects.get(
+                    id=pagination['before_id'],
+                    organization_id=organization_id
+                )
+                queryset = queryset.filter(created_at__lt=before_message.created_at)
+            except Message.DoesNotExist:
+                return queryset.none()
         
-        # Offset for traditional pagination (less common in real-time apps)
-        if 'offset' in pagination and pagination['offset']:
-            queryset = queryset[pagination['offset']:]
-        
-        # Get messages before a specific message (scroll up in conversation)
-        if 'before_id' in pagination and pagination['before_id']:
-            queryset = queryset.filter(
-                created_at__lt=F('created_at')
-            ).filter(
-                id=pagination['before_id']
-            )
-        
-        # Get messages after a specific message (real-time updates)
-        if 'after_id' in pagination and pagination['after_id']:
+        if pagination.get('after_id'):
             try:
                 after_message = Message.objects.get(
                     id=pagination['after_id'],
@@ -338,11 +308,20 @@ def list_messages_for_ticket(
                 )
                 queryset = queryset.filter(created_at__gt=after_message.created_at)
             except Message.DoesNotExist:
-                # If reference message doesn't exist, return empty queryset
                 return queryset.none()
-    
-    # Order by creation time (chronological conversation flow)
-    return queryset.order_by('created_at')
+                
+        # 3. Aplica LIMIT e OFFSET por último (O Slice)
+        offset = pagination.get('offset')
+        limit = pagination.get('limit')
+        
+        if offset and limit:
+            queryset = queryset[offset:offset + limit]
+        elif offset:
+            queryset = queryset[offset:]
+        elif limit:
+            queryset = queryset[:limit]
+            
+    return queryset
 
 
 def get_latest_message_for_ticket(

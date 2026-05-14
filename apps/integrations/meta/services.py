@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 from django.conf import settings
@@ -16,6 +16,7 @@ from apps.crm import services as crm_services
 from apps.helpdesk import selectors as helpdesk_selectors
 from apps.helpdesk import services as helpdesk_services
 from apps.helpdesk.models import Message, Ticket
+from apps.integrations.models import ConnectedAccount
 
 from .events import build_meta_ingestion_context
 from .models import ProcessedProviderMessage, RawWebhookEvent
@@ -29,18 +30,41 @@ class MetaGraphAPIError(Exception):
     """Raised when the WhatsApp Cloud API returns an error or an unexpected body."""
 
 
-def send_whatsapp_message(phone_number_id: str, to: str, body: str) -> str:
+def _graph_api_version_for_account(account: ConnectedAccount) -> str:
+    settings_payload = account.settings or {}
+    raw = settings_payload.get("graph_api_version")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip().strip("/")
+    return (getattr(settings, "META_GRAPH_API_VERSION", None) or "v19.0").strip().strip("/")
+
+
+def send_whatsapp_text_message_via_account(account: ConnectedAccount, to: str, body: str) -> str:
+
+    if account.access_token == "MOCK_TOKEN_123":
+        import time, uuid
+        time.sleep(1)  # Simula a demora da internet indo até o Facebook
+        return f"wamid.mock.{uuid.uuid4().hex[:10]}"
+
     """
-    Send a text message via Meta Graph API (WhatsApp Cloud API).
+    Send a text message via Meta Graph API using DB-backed credentials.
 
     Returns the provider message id (wamid) from the response.
     """
-    token = (getattr(settings, "META_WHATSAPP_ACCESS_TOKEN", None) or "").strip()
-    if not token:
-        raise MetaGraphAPIError("META_WHATSAPP_ACCESS_TOKEN is not configured")
+    from apps.integrations.models import IntegrationProvider
 
-    version = (getattr(settings, "META_GRAPH_API_VERSION", None) or "v19.0").strip().strip("/")
-    url = f"https://graph.facebook.com/{version}/{phone_number_id}/messages"
+    if account.provider != IntegrationProvider.WHATSAPP_CLOUD:
+        raise MetaGraphAPIError("Connected account provider is not WhatsApp Cloud API")
+    if not account.is_active:
+        raise MetaGraphAPIError("Connected account is inactive")
+
+    token = (account.access_token or "").strip()
+    if not token:
+        raise MetaGraphAPIError(
+            "WhatsApp access token is not configured for this connected account"
+        )
+
+    version = _graph_api_version_for_account(account)
+    url = f"https://graph.facebook.com/{version}/{account.external_id}/messages"
 
     payload: Dict[str, Any] = {
         "messaging_product": "whatsapp",
@@ -147,11 +171,9 @@ def _process_status_update(
     correlation_id: uuid.UUID,
 ) -> bool:
     """Apply Meta delivery status to helpdesk message if present."""
-    from .models import WhatsAppBusinessAccountConnection
-
     try:
         connection = get_connection_by_phone_number_id(status_data.phone_number_id)
-    except WhatsAppBusinessAccountConnection.DoesNotExist:
+    except ConnectedAccount.DoesNotExist:
         logger.warning(
             "meta_status_unknown_phone_number_id",
             extra={
@@ -217,8 +239,9 @@ def _process_message(
         phone=message_data.sender_phone,
         display_name=message_data.contact_name,
         correlation_id=correlation_id,
+        connected_account=connection,
     )
-    ticket = _resolve_ticket(
+    ticket, ticket_was_created = _resolve_ticket(
         organization_id=organization_id,
         customer_id=customer.id,
         title=message_data.text_body,
@@ -244,6 +267,38 @@ def _process_message(
         },
     )
 
+    if ticket_was_created:
+        greeting = _connected_account_auto_greeting_text(connection)
+        if greeting:
+            try:
+                helpdesk_services.create_whatsapp_auto_greeting_message(
+                    ticket_id=ticket.id,
+                    organization_id=organization_id,
+                    content=greeting,
+                    correlation_id=correlation_id,
+                )
+            except helpdesk_services.HelpdeskValidationError as exc:
+                logger.warning(
+                    "whatsapp_auto_greeting_skipped",
+                    extra=build_meta_ingestion_context(
+                        correlation_id=str(correlation_id),
+                        event_id=str(raw_event.id),
+                        organization_id=str(organization_id),
+                        ticket_id=str(ticket.id),
+                    )
+                    | {"reason": str(exc)},
+                )
+            except Exception:
+                logger.exception(
+                    "whatsapp_auto_greeting_failed",
+                    extra=build_meta_ingestion_context(
+                        correlation_id=str(correlation_id),
+                        event_id=str(raw_event.id),
+                        organization_id=str(organization_id),
+                        ticket_id=str(ticket.id),
+                    ),
+                )
+
     logger.info(
         "meta_webhook_message_processed",
         extra=build_meta_ingestion_context(
@@ -256,18 +311,27 @@ def _process_message(
     return True
 
 
+def _auto_create_customers_for_account(account: Optional[ConnectedAccount] = None) -> bool:
+    if account is not None:
+        payload = account.settings or {}
+        if "auto_create_customers" in payload:
+            return bool(payload["auto_create_customers"])
+    return bool(getattr(settings, "META_AUTO_CREATE_CUSTOMERS", True))
+
+
 def _resolve_customer(
     *,
     organization_id: uuid.UUID,
     phone: str,
     display_name: Optional[str],
     correlation_id: uuid.UUID,
+    connected_account: Optional[ConnectedAccount] = None,
 ):
     customer = crm_selectors.get_customer_by_phone(phone, organization_id)
     if customer:
         return customer
 
-    if not getattr(settings, "META_AUTO_CREATE_CUSTOMERS", True):
+    if not _auto_create_customers_for_account(connected_account):
         raise MetaWebhookProcessingError(f"Customer not found for WhatsApp phone {phone}")
 
     normalized_digits = "".join(character for character in phone if character.isdigit())
@@ -285,22 +349,47 @@ def _resolve_customer(
     )
 
 
+def _connected_account_auto_greeting_text(account: ConnectedAccount) -> Optional[str]:
+    """
+    Return greeting body from ConnectedAccount.settings, or None if disabled / empty.
+
+    Expected keys (aligned with the operational settings UI):
+    - auto_greeting_enabled: bool (must be exactly True)
+    - auto_greeting_message: non-empty str
+    """
+    payload = account.settings or {}
+    if payload.get("auto_greeting_enabled") is not True:
+        return None
+    raw = payload.get("auto_greeting_message")
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    return text or None
+
+
 def _resolve_ticket(
     *,
     organization_id: uuid.UUID,
     customer_id: uuid.UUID,
     title: str,
     correlation_id: uuid.UUID,
-) -> Ticket:
+) -> Tuple[Ticket, bool]:
+    """
+    Return (ticket, created).
+
+    ``created`` is True only when a new ticket row was created for this inbound
+    (no existing open WhatsApp ticket for the customer). Used for first-contact
+    auto-greeting without replying on every message.
+    """
     ticket = helpdesk_selectors.get_open_ticket_for_customer(
         customer_id=customer_id,
         organization_id=organization_id,
         channel=Ticket.Channel.WHATSAPP,
     )
     if ticket:
-        return ticket
+        return ticket, False
 
-    return helpdesk_services.create_ticket(
+    ticket = helpdesk_services.create_ticket(
         organization_id=organization_id,
         customer_id=customer_id,
         title=title[:255],
@@ -310,3 +399,4 @@ def _resolve_ticket(
         source_provider="meta",
         metadata={"source_provider": "meta", "correlation_id": str(correlation_id)},
     )
+    return ticket, True

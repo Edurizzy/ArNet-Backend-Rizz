@@ -2,11 +2,7 @@
 
 from django.contrib import admin
 
-from .models import (
-    ProcessedProviderMessage,
-    RawWebhookEvent,
-    WhatsAppBusinessAccountConnection,
-)
+from .models import ProcessedProviderMessage, RawWebhookEvent
 
 
 @admin.register(RawWebhookEvent)
@@ -59,24 +55,3 @@ class ProcessedProviderMessageAdmin(admin.ModelAdmin):
         "updated_at",
     ]
     ordering = ["-processed_at"]
-
-
-@admin.register(WhatsAppBusinessAccountConnection)
-class WhatsAppBusinessAccountConnectionAdmin(admin.ModelAdmin):
-    list_display = [
-        "organization",
-        "business_account_id",
-        "phone_number_id",
-        "display_phone_number",
-        "is_active",
-        "created_at",
-    ]
-    list_filter = ["is_active", "organization", "created_at"]
-    search_fields = [
-        "organization__name",
-        "business_account_id",
-        "phone_number_id",
-        "display_phone_number",
-    ]
-    readonly_fields = ["id", "created_at", "updated_at"]
-    ordering = ["organization", "display_phone_number"]

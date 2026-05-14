@@ -73,7 +73,11 @@ def send_outbound_message_task(self, message_id: str, correlation_id: str) -> No
     from apps.helpdesk import services as helpdesk_services
     from apps.helpdesk.models import Message
     from apps.integrations.meta import selectors as meta_selectors
-    from apps.integrations.meta.services import MetaGraphAPIError, send_whatsapp_message
+    from apps.integrations.meta.services import MetaGraphAPIError, send_whatsapp_text_message_via_account
+
+    OUTBOUND_GRAPH_FAILURE_USER_MESSAGE = (
+        "WhatsApp send failed. Verify the connected account access token and Meta API status."
+    )
 
     try:
         org_id = Message.objects.values_list("organization_id", flat=True).get(pk=mid)
@@ -104,11 +108,13 @@ def send_outbound_message_task(self, message_id: str, correlation_id: str) -> No
     to_number = helpdesk_services.normalize_whatsapp_to_number(row.ticket.customer.phone or "")
 
     try:
-        wamid = send_whatsapp_message(conn.phone_number_id, to_number, row.content)
+        wamid = send_whatsapp_text_message_via_account(conn, to_number, row.content)
     except MetaGraphAPIError as exc:
         if self.request.retries >= self.max_retries:
             with transaction.atomic():
-                helpdesk_services.finalize_outbound_message_failed(mid, org_id, str(exc))
+                helpdesk_services.finalize_outbound_message_failed(
+                    mid, org_id, OUTBOUND_GRAPH_FAILURE_USER_MESSAGE
+                )
             finalized = Message.objects.get(pk=mid)
             helpdesk_services.broadcast_helpdesk_message_event(
                 org_id, finalized, correlation_id=cid, provider="meta"

@@ -627,6 +627,70 @@ def create_outbound_message(
 
 
 @transaction.atomic
+def create_whatsapp_auto_greeting_message(
+    ticket_id: uuid.UUID,
+    organization_id: uuid.UUID,
+    content: str,
+    correlation_id: Optional[uuid.UUID] = None,
+) -> Message:
+    """
+    Queue the first-contact WhatsApp auto-greeting via the same Celery pipeline as agent sends.
+
+    Uses ``SenderType.SYSTEM`` (no agent user). Meta Graph API is only invoked from
+    ``send_outbound_message_task`` after commit.
+    """
+    if not content or not content.strip():
+        raise HelpdeskValidationError("Message content is required")
+
+    content = content.strip()
+    correlation = correlation_id or uuid.uuid4()
+
+    ticket = selectors.get_ticket_for_update(ticket_id, organization_id)
+    if ticket.channel != Ticket.Channel.WHATSAPP:
+        raise HelpdeskValidationError("Auto-greeting only applies to WhatsApp tickets")
+
+    normalize_whatsapp_to_number(ticket.customer.phone or "")
+
+    now = timezone.now()
+    message = Message.objects.create(
+        organization_id=organization_id,
+        ticket=ticket,
+        sender_type=Message.SenderType.SYSTEM,
+        direction=Message.Direction.OUTBOUND,
+        sender_id=None,
+        content=content,
+        is_internal=False,
+        delivery_status=Message.DeliveryStatus.QUEUED,
+        queued_at=now,
+        correlation_id=correlation,
+        metadata={
+            "correlation_id": str(correlation),
+            "auto_greeting": True,
+        },
+    )
+
+    ticket.save()
+
+    new_message_event = build_new_message_event(
+        message,
+        correlation_id=str(correlation),
+        provider="meta",
+    )
+    transaction.on_commit(
+        lambda: _broadcast_realtime_event(organization_id, new_message_event)
+    )
+
+    def _enqueue_outbound() -> None:
+        from apps.integrations.meta.tasks import send_outbound_message_task
+
+        send_outbound_message_task.delay(str(message.id), str(correlation))
+
+    transaction.on_commit(_enqueue_outbound)
+
+    return message
+
+
+@transaction.atomic
 def start_outbound_message_send(message_id: uuid.UUID, organization_id: uuid.UUID) -> Message:
     """
     Transition queued -> sending under row lock.

@@ -55,8 +55,8 @@ class TicketSerializer(serializers.ModelSerializer):
     is_overdue = serializers.ReadOnlyField()
     message_count = serializers.IntegerField(read_only=True)
     
-    # Customer ID for ticket creation/updates
-    customer_id = serializers.UUIDField(write_only=True)
+    # Expose real CRM customer UUID on reads (write-only was hiding it and broke agent UI).
+    customer_id = serializers.UUIDField(read_only=True)
     
     # Agent assignment
     assigned_to = serializers.UUIDField(
@@ -87,6 +87,7 @@ class TicketSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id',
+            'customer_id',
             'customer_name', 
             'customer_email',
             'assigned_to_name',
@@ -193,6 +194,7 @@ class TicketListSerializer(serializers.ModelSerializer):
     """
     
     customer_name = serializers.CharField(source='customer.name', read_only=True)
+    customer_id = serializers.UUIDField(read_only=True)
     assigned_to_name = serializers.CharField(
         source='assigned_to.get_full_name',
         read_only=True,
@@ -207,6 +209,7 @@ class TicketListSerializer(serializers.ModelSerializer):
         model = Ticket
         fields = [
             'id',
+            'customer_id',
             'customer_name',
             'assigned_to_name',
             'title',
@@ -218,7 +221,7 @@ class TicketListSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at'
         ]
-        read_only_fields = ['id', 'customer_name', 'assigned_to_name', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'customer_id', 'customer_name', 'assigned_to_name', 'created_at', 'updated_at']
 
 
 # =============================================================================

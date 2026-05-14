@@ -68,6 +68,7 @@ LOCAL_APPS = [
     'apps.audit',
     'apps.crm',
     'apps.helpdesk',
+    'apps.integrations',
     'apps.integrations.meta',
 ]
 
@@ -297,7 +298,6 @@ EMAIL_BACKEND = env('EMAIL_BACKEND', default='django.core.mail.backends.console.
 # Meta / WhatsApp Cloud API
 META_APP_SECRET = env('META_APP_SECRET', default='')
 META_AUTO_CREATE_CUSTOMERS = env.bool('META_AUTO_CREATE_CUSTOMERS', default=True)
-META_WHATSAPP_ACCESS_TOKEN = env('META_WHATSAPP_ACCESS_TOKEN', default='')
 META_GRAPH_API_VERSION = env('META_GRAPH_API_VERSION', default='v19.0')
 
 # Health Check

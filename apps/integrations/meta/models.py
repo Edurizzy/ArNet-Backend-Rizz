@@ -66,25 +66,3 @@ class ProcessedProviderMessage(TenantAwareModel):
 
     def __str__(self) -> str:
         return f"{self.provider}:{self.provider_message_id}"
-
-
-class WhatsAppBusinessAccountConnection(TenantAwareModel):
-    """Maps Meta phone numbers to tenant organizations."""
-
-    business_account_id = models.CharField(max_length=255)
-    phone_number_id = models.CharField(max_length=255, db_index=True)
-    display_phone_number = models.CharField(max_length=50)
-    webhook_verify_token = models.CharField(max_length=255)
-    is_active = models.BooleanField(default=True)
-
-    class Meta:
-        verbose_name = "WhatsApp Business Account Connection"
-        verbose_name_plural = "WhatsApp Business Account Connections"
-        indexes = [
-            models.Index(fields=["organization"], name="meta_conn_org_idx"),
-            models.Index(fields=["phone_number_id"], name="meta_conn_phone_idx"),
-            models.Index(fields=["organization", "phone_number_id"], name="meta_conn_org_phone_idx"),
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.display_phone_number} ({self.phone_number_id})"
